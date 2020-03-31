@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="MlOps-as-a-Service Experiment Console">
+    <meta name="author" content="darkreapyre@gmail.com">
+    <link rel="icon" href="">
+    <title>Welcome to the MMP Console</title>
+    <link href="{{ url_for('static', filename='css/bootstrap.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/jumbotron.css') }}" rel="stylesheet">
+  </head>
+  <body>
+    <nav class="navbar navbar-inverse navbar-fixed-top">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="#"><b>MMP Console</b></a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+          <div class="navbar-header navbar-right">
+            <a class="btn btn-info btn-lg" href="{{ dashboard }}" role="button" target="_blank">Experiment Dasboard</a>
+          </div>
+      </div>
+    </nav>
+    <div class="jumbotron">
+      <div class="container">
+        <h1>Managed MlOps Pipeline (MMP)</h1>
+        <p>The MMP solution allows you to create Machine Learning Experiments by leveraging an AWS managed MlOps Pipeline to train Machine Learning models at scale.</p>
+        <p>To address your <strong>complexity</strong>, <strong>cost</strong>, and <strong>span of control</strong> requirements, the Amazon MMP service leverages a selection of back-end training frameworks, such as Amazon SageMaker, allowing you the flexibility to choose the right model training solution to fit your business objectives.</p>
+        <p>The service further allows you manage these experiments through an Experiment Dashboard and makes it easier for you analyze each trained machine learning model and compare them individually, before deploying the best one into production.</p>
+        <p><a class="btn btn-info btn-lg" href="{{ url_for('create_experiment') }}" role="button">Create Experiment &raquo;</a></p>
+      </div>
+    </div>
+
+  </body>
+</html>

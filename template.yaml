@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: 'AWS::Serverless-2016-10-31'
+Description: >
+  This template provisions the MlOps Orchestration workflow and Experiment Management Framework for the MlOPS-as-a-Service Solution.
+
+Parameters:
+  EmailAddress:
+    Description: E-Mail Address to send deployment updates to.
+    Type: String
+  S3BootstrapBucket:
+    Description: >
+      Name of the S3 Bucket for bootstratpping training asets
+    Type: String
+
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Description: Deployment status messages.
+    Properties:
+      DisplayName: Machine Learning Ochestration Update Message
+      Subscription:
+        - Endpoint: !Ref EmailAddress
+          Protocol: email
+      TopicName: !Sub ${AWS::StackName}-SNS
+  S3ExperimentBucket:
+    Type: AWS::S3::Bucket
+    Description: Training experiment data.
+    DeletionPolicy: Retain
+    Properties:
+#      BucketName: !Sub ${AWS::StackName}-training-experiments-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+  PreConfig:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/pre-config-template.yaml
+      Parameters:
+        S3BootstrapBucket: !Ref S3BootstrapBucket
+        S3ExperimentBucket: !Ref S3ExperimentBucket
+  MlFlowBuild:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/mlflow-build-template.yaml
+      Parameters:
+        Name: !Ref AWS::StackName
+        S3BootstrapBucket: !Ref S3BootstrapBucket
+        S3ExperimentBucket: !Ref S3ExperimentBucket
+        VpcCIDR: 10.215.0.0/16
+        Subnet1CIDR: 10.215.10.0/24
+        Subnet2CIDR: 10.215.20.0/24
+  MlFlowDeployment:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/mlflow-deployment-template.yaml
+      Parameters:
+        SubnetA: !GetAtt MlFlowBuild.Outputs.Subnet1
+        SubnetB: !GetAtt MlFlowBuild.Outputs.Subnet2
+        VpcId: !GetAtt MlFlowBuild.Outputs.VpcId
+        Image: !GetAtt MlFlowBuild.Outputs.Image
+  FrontEnd:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/front-end-template.yaml
+      Parameters:
+        S3ExperimentBucket: !Ref S3ExperimentBucket
+        DashboardURL: !GetAtt MlFlowDeployment.Outputs.Endpoint
+  SageMakerMlOps:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/sm-mlops-template.yaml
+      Parameters:
+       S3BootstrapBucket: !Ref S3BootstrapBucket
+       SNSTopic: !Ref SNSTopic
+       S3ExperimentBucket: !Ref S3ExperimentBucket
+       MasterImage: !GetAtt PreConfig.Outputs.MasterImage
+  PostConfig:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${S3BootstrapBucket}/templates/post-config-template.yaml
+      Parameters:
+        S3BootstrapBucket: !Ref S3BootstrapBucket
+        S3ExperimentBucket: !Ref S3ExperimentBucket
+        SageMakerStateMachine: !GetAtt SageMakerMlOps.Outputs.SageMakerStateMachine
+
+Outputs:
+  FrontEndURL:
+    Description: Front-end application URL.
+    Value: !GetAtt FrontEnd.Outputs.ServiceEndpoint
+  ExperimentBucket:
+    Description: S3 Bucekt container ML Experiment data.
+    Value: !Ref S3ExperimentBucket
+  MlFlowURL:
+    Description: URL for MlFlow Experiment DashboardURL.
+    Value: !GetAtt MlFlowDeployment.Outputs.Endpoint

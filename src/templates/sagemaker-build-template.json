@@ -1,0 +1,716 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Infrastructure resources for horovod training.",
+    "Parameters": {
+        "S3BootstrapBucket": {
+            "Description": "Name of the S3 Bucket for bootstratpping training assets.\n",
+            "Type": "String"
+        },
+        "ModelPrefix": {
+            "Description": "Prefix to prepend to resources created for the model (Must be lower-case).",
+            "Type": "String"
+        },
+        "GitHubUser": {
+            "Description": "Name of the GitHub User for training code access.\n",
+            "Type": "String"
+        },
+        "GitHubRepo": {
+            "Description": "Name opf the source code repository.\n",
+            "Type": "String"
+        },
+        "SubnetCidrBlock1": {
+            "Description": "CidrBlock for subnet 1. CidrBlock has 256 IPs total",
+            "Type": "String",
+            "Default": "10.0.0.0/24"
+        },
+        "SubnetCidrBlock2": {
+            "Description": "CidrBlock for subnet 2. CidrBlock has 256 IPs total",
+            "Type": "String",
+            "Default": "10.0.1.0/24"
+        },
+        "NumGPUs": {
+            "Description": "Number of GPUs for Horovod training container",
+            "Type": "String"
+        },
+        "DashboardURL": {
+            "Description": "MlFlow Tracking API URL",
+            "Type": "String"
+        },
+        "DatasetName": {
+            "Description": "Name pof the Training Dataset",
+            "Type": "String"
+        },
+        "S3ExperimentBucket": {
+            "Description": "Name of the S3 Bucket containing ML Experiment data\n",
+            "Type": "String"
+        },
+        "MasterImage": {
+            "Description": "Name of the Master Horovod Contianer Image\n",
+            "Type": "String"
+        }
+    },
+    "Resources": {
+        "EcrRepository": {
+            "Type": "AWS::ECR::Repository",
+            "DeletionPolicy": "Delete",
+            "Properties": {
+                "RepositoryName": {
+                    "Fn::Sub": "${ModelPrefix}"
+                },
+                "RepositoryPolicyText": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "AllowPull",
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": [
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:BatchGetImage",
+                                "ecr:BatchCheckLayerAvailability"
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        "PreProcessDataProject": {
+            "Type": "AWS::CodeBuild::Project",
+            "Properties": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-PreProcessData"
+                },
+                "Artifacts": {
+                    "Type": "NO_ARTIFACTS"
+                },
+                "Source": {
+                    "Type": "S3",
+                    "Location": {
+                        "Fn::Sub": "${S3BootstrapBucket}/artifacts/scripts.zip"
+                    },
+                    "BuildSpec": {
+                        "Fn::Sub": "version: 0.2\nphases:\n  install:\n    commands:\n      - apt-get update && apt-get -y install python-pip\n      - pip install --upgrade python\n      - pip install --upgrade awscli\n  pre_build:\n    commands:\n      - printenv\n      - ls -ld $(find .)\n      - chmod +x ./scripts/preprocess.sh\n  build:\n    commands:\n      - ./scripts/preprocess.sh\n"
+                    }
+                },
+                "Environment": {
+                    "ComputeType": "BUILD_GENERAL1_LARGE",
+                    "Image": "aws/codebuild/ubuntu-base:14.04",
+                    "Type": "LINUX_CONTAINER"
+                },
+                "ServiceRole": {
+                    "Ref": "CodeBuildServiceRole"
+                },
+                "TimeoutInMinutes": 480
+            }
+        },
+        "StartTrainContainerBuild": {
+            "Type": "Custom::StartTrainContainerBuild",
+            "Properties": {
+                "ServiceToken": {
+                    "Fn::GetAtt": [
+                        "TrainContainerBuildLambda",
+                        "Arn"
+                    ]
+                },
+                "ProjectName": {
+                    "Ref": "TrainContainerBuildProject"
+                },
+                "EcrRepository": {
+                    "Ref": "EcrRepository"
+                }
+            }
+        },
+        "TrainContainerBuildLambda": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Handler": "index.lambda_handler",
+                "Runtime": "python3.6",
+                "Description": "Start Training Container CodeBuild Project",
+                "Role": {
+                    "Fn::GetAtt": [
+                        "LambdaExecutionRole",
+                        "Arn"
+                    ]
+                },
+                "Timeout": 30,
+                "Code": {
+                    "ZipFile": {
+                        "Fn::Join": [
+                            "\n",
+                            [
+                                "import os",
+                                "import json",
+                                "import botocore",
+                                "import boto3",
+                                "import logging",
+                                "import traceback",
+                                "import cfnresponse",
+                                "",
+                                "logger = logging.getLogger()",
+                                "logger.setLevel(logging.INFO)",
+                                "",
+                                "def start_build(properties):",
+                                "    # Start the Container CodeBuild Job",
+                                "    codebuild = boto3.client('codebuild')",
+                                "    project_name = properties.get('ProjectName')",
+                                "    response = codebuild.start_build(projectName=project_name)",
+                                "    return response",
+                                "",
+                                "def lambda_handler(event, context):",
+                                "    logger.debug('Event: {}'.format(event)) #debug",
+                                "    logger.debug('Context: {}'.format(context)) #debug",
+                                "    properties = event['ResourceProperties']",
+                                "    responseData = {}",
+                                "    ",
+                                "    if event['RequestType'] == 'Create':",
+                                "        # Trigger the CodeBuild project upon cfn creation",
+                                "        try:",
+                                "            start_build_response = start_build(properties)",
+                                "            logger.info('successfully started training container build: {}'.format(start_build_response))",
+                                "            responseData = {'Success': 'Training Container '+properties.get('ProjectName')+' successfully started ...'}",
+                                "            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, 'CustomResourcePhysicalID')",
+                                "        except Exception as e:",
+                                "            logger.error(e, exc_info=True)",
+                                "            responseData = {'Error': traceback.format_exc(e)}",
+                                "            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, 'CustomResourcePhysicalID')",
+                                "    ",
+                                "    if event['RequestType'] == 'Delete':",
+                                "        # Delete the ECR Repository upon cfn deletion",
+                                "        try:",
+                                "            ecr = boto3.client('ecr')",
+                                "            ecr.delete_repository(repositoryName=properties.get('EcrRepository'), force=True)",
+                                "            logger.info('delete ecr repository completed ...')",
+                                "            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, 'CustomResourcePhysicalID')",
+                                "        except Exception as e:",
+                                "            logger.error(e, exc_info=True)",
+                                "            responseData = {'Error': traceback.format_exc(e)}",
+                                "            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, 'CustomResourcePhysicalID')"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "LambdaExecutionRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "lambda.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "root",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Resource": "arn:aws:logs:*:*:*"
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "codebuild:StartBuild"
+                                    ],
+                                    "Resource": {
+                                        "Fn::GetAtt": [
+                                            "TrainContainerBuildProject",
+                                            "Arn"
+                                        ]
+                                    }
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ecr:*"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepository}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "TrainContainerBuildProject": {
+            "Type": "AWS::CodeBuild::Project",
+            "Properties": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-BuildTrainContainer"
+                },
+                "Artifacts": {
+                    "Type": "NO_ARTIFACTS"
+                },
+                "Source": {
+                    "Type": "S3",
+                    "Location": {
+                        "Fn::Sub": "${S3BootstrapBucket}/artifacts/container-src.zip"
+                    },
+                    "BuildSpec": {
+                        "Fn::Sub": "version: 0.2\nphases:\n  install:\n    runtime-versions:\n      docker: 18\n      python: 3.7\n    commands:\n      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --storage-driver=overlay2&\n      - timeout 15 sh -c \"until docker info; do echo .; sleep 1; done\"\n      - apt-get update && apt-get -y install git\n      - pip install --upgrade awscli\n  pre_build:\n    commands: \n      - printenv\n      - printf \"%s:%s\" \"$REPOSITORY_URI\" \"latest\" > /tmp/build_tag.out\n      - git clone https://github.com/$GITHUB_USER/$GITHUB_REPO code\n  build:\n    commands:\n      - $(aws ecr get-login --no-include-email)\n      - docker build -t \"$(cat /tmp/build_tag.out)\" --build-arg DASHBOARD_URL=$DASHBOARD_URL --build-arg NUM_GPUS=$NUM_GPUS --build-arg DATASET_NAME=$DATASET_NAME --build-arg EXPERIMENT_NAME=$EXPERIMENT_NAME --build-arg MASTER_IMAGE=$MASTER_IMAGE -f Dockerfile .\n  post_build:\n    commands:\n      - docker push \"$(cat /tmp/build_tag.out)\"\n"
+                    }
+                },
+                "Environment": {
+                    "ComputeType": "BUILD_GENERAL1_LARGE",
+                    "Image": "aws/codebuild/standard:2.0",
+                    "Type": "LINUX_CONTAINER",
+                    "PrivilegedMode": true,
+                    "EnvironmentVariables": [
+                        {
+                            "Name": "AWS_DEFAULT_REGION",
+                            "Value": {
+                                "Ref": "AWS::Region"
+                            }
+                        },
+                        {
+                            "Name": "REPOSITORY_URI",
+                            "Value": {
+                                "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}"
+                            }
+                        },
+                        {
+                            "Name": "GITHUB_USER",
+                            "Value": {
+                                "Ref": "GitHubUser"
+                            }
+                        },
+                        {
+                            "Name": "GITHUB_REPO",
+                            "Value": {
+                                "Ref": "GitHubRepo"
+                            }
+                        },
+                        {
+                            "Name": "NUM_GPUS",
+                            "Value": {
+                                "Ref": "NumGPUs"
+                            }
+                        },
+                        {
+                            "Name": "DASHBOARD_URL",
+                            "Value": {
+                                "Ref": "DashboardURL"
+                            }
+                        },
+                        {
+                            "Name": "DATASET_NAME",
+                            "Value": {
+                                "Ref": "DatasetName"
+                            }
+                        },
+                        {
+                            "Name": "EXPERIMENT_NAME",
+                            "Value": {
+                                "Ref": "ModelPrefix"
+                            }
+                        },
+                        {
+                            "Name": "MASTER_IMAGE",
+                            "Value": {
+                                "Ref": "MasterImage"
+                            }
+                        }
+                    ]
+                },
+                "ServiceRole": {
+                    "Ref": "CodeBuildServiceRole"
+                },
+                "TimeoutInMinutes": 45
+            }
+        },
+        "CodeBuildServiceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "Path": "/",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "codebuild.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "root",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Resource": "*",
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents",
+                                        "ecr:GetAuthorizationToken",
+                                        "codebuild:BatchGetBuilds"
+                                    ]
+                                },
+                                {
+                                    "Resource": [
+                                        {
+                                            "Fn::Sub": "arn:aws:s3:::${S3ExperimentBucket}/*"
+                                        },
+                                        {
+                                            "Fn::Sub": "arn:aws:s3:::${S3ExperimentBucket}"
+                                        }
+                                    ],
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:GetObject*",
+                                        "s3:PutObject*"
+                                    ]
+                                },
+                                {
+                                    "Resource": {
+                                        "Fn::Sub": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepository}"
+                                    },
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ecr:GetDownloadUrlForLayer",
+                                        "ecr:BatchGetImage",
+                                        "ecr:BatchCheckLayerAvailability",
+                                        "ecr:PutImage",
+                                        "ecr:InitiateLayerUpload",
+                                        "ecr:UploadLayerPart",
+                                        "ecr:CompleteLayerUpload"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "VPC": {
+            "Metadata": {
+                "Comment": "VPC for sagemaker horovod training job."
+            },
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "CidrBlock": "10.0.0.0/16",
+                "EnableDnsHostnames": "false",
+                "EnableDnsSupport": "true"
+            }
+        },
+        "Subnet1": {
+            "Metadata": {
+                "Comment": "Public subnet for horovod training job external access."
+            },
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "AvailabilityZone": {
+                    "Fn::Select": [
+                        "0",
+                        {
+                            "Fn::GetAZs": {
+                                "Ref": "AWS::Region"
+                            }
+                        }
+                    ]
+                },
+                "CidrBlock": {
+                    "Ref": "SubnetCidrBlock1"
+                },
+                "VpcId": {
+                    "Ref": "VPC"
+                }
+            }
+        },
+        "Subnet2": {
+            "Metadata": {
+                "Comment": "Private subnet for sagemaker horovod training job instances."
+            },
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "AvailabilityZone": {
+                    "Fn::Select": [
+                        "0",
+                        {
+                            "Fn::GetAZs": {
+                                "Ref": "AWS::Region"
+                            }
+                        }
+                    ]
+                },
+                "CidrBlock": {
+                    "Ref": "SubnetCidrBlock2"
+                },
+                "VpcId": {
+                    "Ref": "VPC"
+                }
+            }
+        },
+        "InternetGateway": {
+            "Type": "AWS::EC2::InternetGateway"
+        },
+        "VPCGatewayAttachment": {
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "InternetGatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "ElasticIp": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc"
+            }
+        },
+        "NATGateway": {
+            "Type": "AWS::EC2::NatGateway",
+            "Properties": {
+                "AllocationId": {
+                    "Fn::GetAtt": [
+                        "ElasticIp",
+                        "AllocationId"
+                    ]
+                },
+                "SubnetId": {
+                    "Ref": "Subnet1"
+                }
+            }
+        },
+        "SecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "GroupDescription": "Base VPC Security Group"
+            }
+        },
+        "SecurityGroupIngress": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "SecurityGroup"
+                },
+                "IpProtocol": "tcp",
+                "ToPort": "65535",
+                "FromPort": "0",
+                "SourceSecurityGroupId": {
+                    "Ref": "SecurityGroup"
+                }
+            }
+        },
+        "TrafficEncryptedSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "GroupDescription": "Traffic-Encrypted Customer VPC Security Group"
+            }
+        },
+        "IkeSecurityGroupIngress": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "TrafficEncryptedSecurityGroup"
+                },
+                "IpProtocol": "udp",
+                "ToPort": "500",
+                "FromPort": "500",
+                "SourceSecurityGroupId": {
+                    "Ref": "TrafficEncryptedSecurityGroup"
+                }
+            }
+        },
+        "EspSecurityGroupIngress": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "TrafficEncryptedSecurityGroup"
+                },
+                "IpProtocol": "50",
+                "ToPort": "0",
+                "FromPort": "0",
+                "SourceSecurityGroupId": {
+                    "Ref": "TrafficEncryptedSecurityGroup"
+                }
+            }
+        },
+        "RouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                }
+            }
+        },
+        "Route": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "RouteTable"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "NatGatewayId": {
+                    "Ref": "NATGateway"
+                }
+            }
+        },
+        "PublicRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                }
+            }
+        },
+        "PublicRoute": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": "VPCGatewayAttachment",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "PublicRouteTable"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "Subnet1RouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "PublicRouteTable"
+                },
+                "SubnetId": {
+                    "Ref": "Subnet1"
+                }
+            }
+        },
+        "Subnet2RouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "RouteTable"
+                },
+                "SubnetId": {
+                    "Ref": "Subnet2"
+                }
+            }
+        },
+        "VpcEndpoint": {
+            "Type": "AWS::EC2::VPCEndpoint",
+            "Properties": {
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Action": [
+                                "s3:GetObject",
+                                "s3:PutObject",
+                                "s3:ListBucket",
+                                "s3:GetBucketLocation",
+                                "s3:DeleteObject",
+                                "s3:ListMultipartUploadParts",
+                                "s3:AbortMultipartUpload"
+                            ],
+                            "Effect": "Allow",
+                            "Resource": [
+                                "*"
+                            ],
+                            "Principal": "*"
+                        }
+                    ]
+                },
+                "RouteTableIds": [
+                    {
+                        "Ref": "RouteTable"
+                    }
+                ],
+                "ServiceName": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "com.amazonaws.",
+                            {
+                                "Ref": "AWS::Region"
+                            },
+                            ".s3"
+                        ]
+                    ]
+                },
+                "VpcId": {
+                    "Ref": "VPC"
+                }
+            }
+        }
+    },
+    "Outputs": {
+        "VpcId": {
+            "Description": "Vpc ID",
+            "Value": {
+                "Ref": "VPC"
+            }
+        },
+        "SubnetId": {
+            "Description": "Subnet2 ID",
+            "Value": {
+                "Ref": "Subnet2"
+            }
+        },
+        "SecurityGroupId": {
+            "Description": "Security Group ID",
+            "Value": {
+                "Ref": "SecurityGroup"
+            }
+        },
+        "ContainerImage": {
+            "Description": "ECR Image for Training Container",
+            "Value": {
+                "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}:latest"
+            }
+        },
+        "ContainerBuildProject": {
+            "Description": "Training container build project",
+            "Value": {
+                "Ref": "TrainContainerBuildProject"
+            }
+        },
+        "PreprocessBuildProject": {
+            "Description": "Data preprocessing build project",
+            "Value": {
+                "Ref": "PreProcessDataProject"
+            }
+        }
+    }
+}

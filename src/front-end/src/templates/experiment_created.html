@@ -1,0 +1,11 @@
+{% extends "bootstrap/base.html" %}
+{% block content %}
+  <div class="container">
+  <h3>{{ name }} Experiment Successfully Submited.</h3>
+  <p>To view the results of the {{ name }} Experiment, click to open the Dashboard Console.</p>
+  <a class="btn btn-warning" href="{{ dashboard }}" role="button" target="_blank">Experiment Dashboard</a>
+
+  <hr>
+
+</div>
+{% endblock %}

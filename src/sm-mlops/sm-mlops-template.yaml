@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CloudFormation Template for SagaeMaker MlOps Orchestration.
+
+Parameters:
+  SNSTopic:
+    Description: Topic to publish status messages.
+    Type: String
+  S3BootstrapBucket:
+    Description: >
+      Name of the S3 Bucket for bootstratpping training asets
+    Type: String
+  S3ExperimentBucket:
+    Description: >
+      Name of the S3 Bucket containing ML Experiment data
+    Type: String
+  MasterImage:
+    Description: >
+      Name of the Master Horovod Container Image
+    Type: String
+
+Resources:
+  SageMakerExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "sagemaker.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+      Path: "/service-role/"
+      Policies:
+        - PolicyName: SageMakerS3ExperimentBucketAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3ExperimentBucket}'
+                  - !Sub 'arn:aws:s3:::${S3ExperimentBucket}/*'
+  SageMakerStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |-
+        {
+          "StartAt": "StartBuildJob",
+          "States": {
+            "StartBuildJob": {
+              "Type": "Task",
+              "Resource": "${StartBuildJobFunction.Arn}",
+              "ResultPath": "$",
+              "Next": "Notify"
+            },
+            "CheckStatusBranch": {
+              "Type": "Choice",
+              "Choices": [{
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "Completed"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "InService"
+                    }
+                  ],
+                  "Next": "Notify"
+                },
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "InProgress"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "Creating"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "Updating"
+                    }
+                  ],
+                  "Next": "CheckStatusWait"
+                },
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "Failed"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "RollingBack"
+                    }
+                  ],
+                  "Next": "Notify"
+                }
+              ]
+            },
+            "CheckStatusWait": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "GetStatus"
+            },
+            "GetStatus": {
+              "Type": "Task",
+              "Resource": "${GetStatusFunction.Arn}",
+              "ResultPath": "$",
+              "Next": "CheckStatusBranch"
+            },
+            "NotifyBranch": {
+              "Type": "Choice",
+              "Choices": [{
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "InProgress"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "Creating"
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "Updating"
+                    }
+                  ],
+                  "Next": "CheckStatusWait"
+                },
+                {
+                  "And": [{
+                      "Or": [{
+                          "Variable": "$.stage",
+                          "StringEquals": "PreProcess"
+                        },
+                                                {
+                          "Variable": "$.stage",
+                          "StringEquals": "Build"
+                        },
+                        {
+                          "Variable": "$.stage",
+                          "StringEquals": "CleanUp"
+                        },
+                        {
+                          "Variable": "$.stage",
+                          "StringEquals": "Training"
+                        }
+                      ]
+                    },
+                    {
+                      "Variable": "$.status",
+                      "StringEquals": "Failed"
+                    }
+                  ],
+                  "Next": "JobFailed"
+                },
+                {
+                  "Variable": "$.status",
+                  "StringEquals": "Completed",
+                  "Next": "JobCompleted"
+                }
+              ]
+            },
+            "Notify": {
+              "Type": "Task",
+              "Resource": "${NotifyFunction.Arn}",
+              "Next": "NotifyBranch"
+            },
+            "JobCompleted":{
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.stage",
+                  "StringEquals": "PreProcess",
+                  "Next": "StartTrainingJob"
+                },
+                {
+                  "Variable": "$.stage",
+                  "StringEquals": "Training",
+                  "Next": "StartCleanupJob"
+                },
+                {
+                  "Variable": "$.stage",
+                  "StringEquals": "Build",
+                  "Next": "StartPreProcessingJob"
+                },
+                {
+                  "Variable": "$.stage",
+                  "StringEquals": "CleanUp",
+                  "Next": "TrainingCompleted"
+                }
+              ]
+            },
+            "JobFailed": {
+              "Type": "Fail"
+            },
+            "StartPreProcessingJob": {
+              "Type": "Task",
+              "Resource": "${StartPreProcessingJobFunction.Arn}",
+              "ResultPath": "$",
+              "Next": "Notify"
+            },
+            "StartTrainingJob": {
+              "Type": "Task",
+              "Resource": "${StartTrainingJobFunction.Arn}",
+              "ResultPath": "$",
+              "Next": "Notify"
+            },
+            "StartCleanupJob": {
+              "Type": "Task",
+              "Resource": "${StartCleanupJobFunctiom.Arn}",
+              "ResultPath": "$",
+              "Next": "Notify"
+            },
+            "TrainingCompleted": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      RoleArn: !GetAtt StepFunctionExecutionRole.Arn
+  StepFunctionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: !Sub states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+  GetStatusFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: get_status.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Checks current status of CodeBuild job; Training Infrastructure Build; SageMaker training job; SageMaker endpoint deployment'
+      Timeout: 30
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "sagemaker:DescribeEndpoint"
+                - "sagemaker:DescribeTrainingJob"
+              Resource: "*"
+            - Effect: "Allow"
+              Action:
+                - "codebuild:BatchGetProjects"
+                - "codebuild:ListProjects"
+                - "codebuild:BatchGetBuilds"
+                - "codebuild:ListBuildsForProject"
+                - "codebuild:ListBuilds"
+              Resource: "*"
+            - Effect: "Allow"
+              Action:
+                - "cloudformation:*"
+              Resource: "*"
+  StartPreProcessingJobFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: start_preprocessing_job.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Starts data pre-processing job'
+      Timeout: 30
+#      Environment:
+#        Variables:
+#          CODEBUILD_PROJECT: !Ref PreProcessDataProject
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "codebuild:BatchGetProjects"
+                - "codebuild:ListProjects"
+                - "codebuild:BatchGetBuilds"
+                - "codebuild:ListBuildsForProject"
+                - "codebuild:ListBuilds"
+                - "codebuild:StartBuild"
+#              Resource: !GetAtt PreProcessDataProject.Arn
+              Resource: "*"
+  StartBuildJobFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: start_build_job.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Starts training infrastructure cloudformation stack'
+      Timeout: 30
+      Environment:
+        Variables:
+          BOOTSTRAP_BUCKET: !Ref S3BootstrapBucket
+          MASTER_IMAGE: !Ref MasterImage
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "s3:*"
+                - "ec2:*Vpc*"
+                - "ec2:*Subnet*"
+                - "ec2:*Gateway*"
+                - "ec2:*Route*"
+                - "ec2:*Address*"
+                - "ec2:*SecurityGroup*"
+                - "ec2:Describe*"
+                - "cloudformation:Create*"
+                - "cloudformation:Describe*"
+                - "cloudformation:GetTemplate"
+                - "cloudformation:ValidateTemplate"
+                - "ecr:Describe*"
+                - "ecr:Create*"
+                - "ecr:Delete*"
+                - "ecr:SetRepositoryPolicy"
+                - "iam:CreateRole"
+                - "iam:DeleteRole"
+                - "iam:PutRolePolicy"
+                - "iam:PassRole"
+                - "iam:GetRole"
+                - "codebuild:Create*"
+                - "codebuild:Delete*"
+                - "codebuild:BatchGetProjects"
+                - "lambda:Create*"
+                - "lambda:Delete*"
+                - "lambda:GetFunction*"
+                - "lambda:InvokeFunction"
+              Resource: "*"
+  StartCleanupJobFunctiom:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: start_cleanup_job.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Deletes training infrastructure cloudformation stack'
+      Timeout: 30
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "s3:*"
+                - "ec2:*Vpc*"
+                - "ec2:*Subnet*"
+                - "ec2:*Gateway*"
+                - "ec2:*Route*"
+                - "ec2:*Address*"
+                - "ec2:*SecurityGroup*"
+                - "ec2:Describe*"
+                - "cloudformation:Create*"
+                - "cloudformation:Describe*"
+                - "cloudformation:GetTemplate"
+                - "cloudformation:ValidateTemplate"
+                - "cloudformation:Delete*"
+                - "lambda:InvokeFunction"
+                - "lambda:DeleteFunction"
+                - "iam:DeleteRolePolicy"
+                - "iam:DeleteRole"
+                - "codebuild:DeleteProject"
+                - "ecr:DeleteRepository"
+              Resource: "*"
+  StartTrainingJobFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: start_training_job.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Starts model training job'
+      Timeout: 30
+      Environment:
+        Variables:
+          SAGEMAKER_ROLE: !GetAtt SageMakerExecutionRole.Arn
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "sagemaker:CreateTrainingJob"
+              Resource: "*"
+            - Effect: "Allow"
+              Action:
+                - "iam:PassRole"
+              Resource: !GetAtt SageMakerExecutionRole.Arn
+  NotifyFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: notify.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Posts message to SNS'
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref SNSTopic
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "sns:Publish"
+              Resource: !Ref SNSTopic
+
+Outputs:
+  SageMakerStateMachine:
+    Description: ARN of the statemachine for SageMaker
+    Value: !Ref SageMakerStateMachine

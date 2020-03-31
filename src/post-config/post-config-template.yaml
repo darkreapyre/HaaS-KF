@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CloudFormation Template to trigger MlOps Orchestration.
+
+Parameters:
+  S3BootstrapBucket:
+    Description: >
+      Name of the S3 Bucket for bootstratpping training asets
+    Type: String
+  S3ExperimentBucket:
+    Description: >
+      Name of the S3 Bucket containing ML Experiment data
+    Type: String
+  SageMakerStateMachine:
+    Description: >
+      StateMachine ARN for the SageMaker training platofrm.
+    Type: String
+
+Resources:
+  ExecuteStateMachineFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: start_statemachine.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Trigger Step Function State Machine from S3 Put event'
+      Timeout: 30
+      Environment:
+        Variables:
+          SageMaker_ARN: !Ref SageMakerStateMachine
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "states:*"
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:*
+              Resource:
+                - !Sub 'arn:aws:s3:::${S3ExperimentBucket}'
+                - !Sub 'arn:aws:s3:::${S3ExperimentBucket}/*'
+  S3EventConfig:
+    Type: Custom::EventConfig
+    Properties:
+      ServiceToken: !GetAtt S3EventConfigLambda.Arn
+      s3_bucket: !Ref S3ExperimentBucket
+      launch_function_arn: !GetAtt ExecuteStateMachineFunction.Arn
+      account_id: !Ref AWS::AccountId
+  S3EventConfigLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: s3_event_config.lambda_handler
+      Runtime: python3.6
+      CodeUri: lambda/
+      Description: 'Creates S3 event trigger and deletes S3 Contents before cfn deletes resources'
+      Timeout: 30
+      MemorySize: 128
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "s3:*"
+                - "lambda:*"
+              Resource: "*"
+
+Outputs: {}

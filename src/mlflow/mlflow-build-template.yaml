@@ -1,0 +1,283 @@
+Description: >
+  Create VPC resources for MlFlow Fargate Service.
+
+Parameters:
+  Name:
+    Type: String
+  VpcCIDR:
+    Type: String
+  Subnet1CIDR:
+    Type: String
+  Subnet2CIDR:
+    Type: String
+  S3BootstrapBucket:
+    Type: String
+  S3ExperimentBucket:
+    Type: String
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: AllowPull
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+  MlFlowConfig:
+    Type: Custom::MlFlowConfig
+    Properties:
+      ServiceToken: !GetAtt MlFlowConfigLambda.Arn
+      ProjectName: !Ref MlFlowContainerBuildProject
+      EcrRepository: !Ref EcrRepository
+  MlFlowConfigLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Start MlFlow Container CodeBuild Project
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: !Join
+          - |+
+
+          -  - import json
+             - import botocore
+             - import boto3
+             - import logging
+             - import traceback
+             - import cfnresponse
+             - ''
+             - logger = logging.getLogger()
+             - logger.setLevel(logging.INFO)
+             - ''
+             - 'def start_build(properties):'
+             - '    # Start the Container CodeBuild Job'
+             - '    codebuild = boto3.client(''codebuild'')'
+             - '    project_name = properties.get(''ProjectName'')'
+             - '    return codebuild.start_build(projectName=project_name)'
+             - ''
+             - 'def lambda_handler(event, context):'
+             - '    logger.debug(''Event: {}''.format(event)) #debug'
+             - '    logger.debug(''Context: {}''.format(context)) #debug'
+             - '    properties = event[''ResourceProperties'']'
+             - '    responseData = {}'
+             - '    if event[''RequestType''] == ''Create'':'
+             - '        # Trigger the CodeBuild project upon cfn creation'
+             - '        try:'
+             - '            start_build_response = start_build(properties)'
+             - '            logger.info(''successfully started build: {}''.format(start_build_response))'
+             - '            responseData = {''Success'': ''Training Container ''+properties.get(''ProjectName'')+'' successfully started ...''}'
+             - '            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, ''CustomResourcePhysicalID'')'
+             - '        except Exception as e:'
+             - '            logger.error(e, exc_info=True)'
+             - '            responseData = {''Error'': traceback.format_exc(e)}'
+             - '            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, ''CustomResourcePhysicalID'')'
+             - '    if event[''RequestType''] == ''Delete'':'
+             - '        # Delete the ECR Repository upon cfn deletion'
+             - '        try:'
+             - '            ecr = boto3.client(''ecr'')'
+             - '            ecr.delete_repository(repositoryName=properties.get(''EcrRepository''), force=True)'
+             - '            logger.info(''delete ecr repository completed ...'')'
+             - '            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, ''CustomResourcePhysicalID'')'
+             - '        except Exception as e:'
+             - '            logger.error(e, exc_info=True)'
+             - '            responseData = {''Error'': traceback.format_exc(e)}'
+             - '            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, ''CustomResourcePhysicalID'')'
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:StartBuild'
+                Resource: !GetAtt MlFlowContainerBuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - 'ecr:*'
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepository}
+  MlFlowContainerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-BuildMlFlowContainer
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: S3
+        Location: !Sub "${S3BootstrapBucket}/artifacts/mlflow-src.zip"
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - apt-get update && apt-get -y install python-pip
+                - pip install --upgrade python
+                - pip install --upgrade awscli
+            pre_build:
+              commands: 
+                - printenv
+                - printf "%s:%s" "$REPOSITORY_URI" "latest" > /tmp/build_tag.out
+            build:
+              commands:
+                - docker build -t "$(cat /tmp/build_tag.out)" --build-arg BUCKET=${S3ExperimentBucket} .
+            post_build:
+              commands:
+                - $(aws ecr get-login --no-include-email)
+                - docker push "$(cat /tmp/build_tag.out)"
+      Environment:
+        ComputeType: "BUILD_GENERAL1_LARGE"
+        Image: "aws/codebuild/docker:17.09.0"
+        Type: "LINUX_CONTAINER"
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}
+          - Name: S3ExperimentBucket
+            Value: !Ref S3ExperimentBucket
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 45
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+                  - codebuild:BatchGetBuilds
+              - Resource:
+                  - !Sub arn:aws:s3:::${S3BootstrapBucket}/*
+                  - !Sub arn:aws:s3:::${S3BootstrapBucket}
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:PutObject*
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepository}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      Tags:
+        - Key: Name
+          Value: !Ref Name
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref Name
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref Subnet1CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name} (Public)
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref Subnet2CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub ${Name} (Public)
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Ref Name
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet1
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet2
+
+Outputs:
+  Subnet1:
+    Value: !Ref Subnet1
+  Subnet2:
+    Value: !Ref Subnet2
+  VpcId:
+    Value: !Ref VPC
+  Image:
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}:latest
