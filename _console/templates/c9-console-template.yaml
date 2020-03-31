@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloud9 IDE Deeplearning Cluster Console
+Metadata: {}
+Parameters:
+  SubnetId:
+    Description: Public Subnet for the console.
+    Type: 'AWS::EC2::Subnet::Id'
+    Default: ''
+  InstanceType:
+    Description: m5 not in east, m4 not in west
+    Type: String
+    Default: t2.large
+
+Mappings: {}
+
+Conditions: {}
+
+Resources:
+  Console:
+    Type: 'AWS::Cloud9::EnvironmentEC2'
+    Properties:
+      Description: 'Cloud9 IDE console for Deeplearning Cluster Management'
+      Repositories:
+        - RepositoryUrl: https://github.com/darkreapyre/HaaS-dev
+          PathComponent: /HaaS-dev
+      AutomaticStopTimeMinutes: 30
+      InstanceType: !Ref InstanceType
+      Name: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-Console'
+      SubnetId: !Ref SubnetId
+
+  Bucket:
+    Description: '-'
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  ConsoleRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: cloudformation
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:*'
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      Path: /
+
+  ConsoleInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ConsoleRole
+
+  AddRoleToInstance:
+    Description: Add ConsoleRole to Cloud9 IDE Instance
+    Type: 'Custom::AddRoleToInstance'
+    DependsOn:
+      - AddRoleToInstanceFunction
+      - Bucket
+    Properties:
+      ServiceToken: !GetAtt 
+        - AddRoleToInstanceFunction
+        - Arn
+      Region: !Ref 'AWS::Region'
+      StackName: !Ref 'AWS::StackName'
+      EnvironmentId: !Ref Console
+      ConsoleInstanceProfileName: !Ref ConsoleInstanceProfile
+      ConsoleInstanceProfileArn: !GetAtt 
+        - ConsoleInstanceProfile
+        - Arn
+      BucketName: !Ref Bucket
+
+  AddRoleToInstanceFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        ZipFile: !Join 
+          - |+
+
+          - - from __future__ import print_function
+            - import boto3
+            - import logging
+            - import json
+            - import time
+            - import traceback
+            - import cfnresponse
+            - ''
+            - logger = logging.getLogger()
+            - logger.setLevel(logging.INFO)
+            - ''
+            - 'def handler(event, context):'
+            - '    logger.debug(''Event: {}''.format(event))'
+            - '    logger.debug(''Context: {}''.format(context))'
+            - '    responseData = {}'
+            - '    '
+            - '    # Immediately respond on Delete'
+            - '    if event[''RequestType''] == ''Delete'':'
+            - '        # Empty Bucket before CloudFormation deletes it'
+            - '        session = boto3.Session()'
+            - '        s3 = session.resource(service_name=''s3'')'
+            - '        try:'
+            - '            bucket = s3.Bucket(event[''ResourceProperties''][''BucketName''])'
+            - '            bucket.object_versions.delete()'
+            - '            '
+            - '            logger.info(''Bucket ''+event[''ResourceProperties''][''BucketName'']+'' objects/versions deleted.'')'
+            - '            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, ''CustomResourcePhysicalID'')'
+            - '        except Exception as e:'
+            - '            logger.error(e, exc_info=True)'
+            - '            responseData = {''Error'': traceback.format_exc(e)}'
+            - '            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, ''CustomResourcePhysicalID'')'
+            - '    '
+            - '    if event[''RequestType''] == ''Create'':'
+            - '        try:'
+            - '            # Open AWS clients'
+            - '            ec2 = boto3.client(''ec2'')'
+            - '            '
+            - '            # Get the InstanceId of the Cloud9 IDE'
+            - '            instance = ec2.describe_instances(Filters=[{''Name'': ''tag:Name'',''Values'': [''aws-cloud9-''+event[''ResourceProperties''][''StackName'']+''-Console''+''-''+event[''ResourceProperties''][''EnvironmentId'']]}])[''Reservations''][0][''Instances''][0]'
+            - '            '
+            - '            # Create the IamInstanceProfile request object'
+            - '            iam_instance_profile = {'
+            - '                ''Arn'': event[''ResourceProperties''][''ConsoleInstanceProfileArn''],'
+            - '                ''Name'': event[''ResourceProperties''][''ConsoleInstanceProfileName'']'
+            - '            }'
+            - '            '
+            - '            # Wait for Instance to become ready before adding Role'
+            - '            instance_state = instance[''State''][''Name'']'
+            - '            while instance_state != ''running'':'
+            - '                time.sleep(5)'
+            - '                instance_state = ec2.describe_instances(InstanceIds=[instance[''InstanceId'']])'
+            - '            ec2.associate_iam_instance_profile(IamInstanceProfile=iam_instance_profile, InstanceId=instance[''InstanceId''])'
+            - '            '
+            - '            responseData = {''Success'': ''Role added to instance''+instance[''InstanceId'']+''.''}'
+            - '            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, ''CustomResourcePhysicalID'')'
+            - '        except Exception as e:'
+            - '            logger.error(e, exc_info=True)'
+            - '            responseData = {''Error'': traceback.format_exc(e)}'
+            - '            cfnresponse.send(event, context, cfnresponse.FAILED, responseData, ''CustomResourcePhysicalID'')'
+      Handler: index.handler
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Runtime: python2.7
+      Timeout: '30'
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:DescribeStackEvents'
+                  - 'cloudformation:DescribeStackResource'
+                  - 'cloudformation:DescribeStackResources'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:AssociateIamInstanceProfile'
+                  - 'ec2:ReplaceIamInstanceProfileAssociation'
+                  - 'iam:ListInstanceProfiles'
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource:
+                  - !GetAtt 
+                    - Bucket
+                    - Arn
+                  - !Join 
+                    - ''
+                    - - !GetAtt 
+                        - Bucket
+                        - Arn
+                      - /*
+
+Outputs:
+  Console:
+    Value: !Join 
+      - ''
+      - - 'https://'
+        - !Ref 'AWS::Region'
+        - .console.aws.amazon.com/cloud9/ide/
+        - !Ref Console
+        - '?region='
+        - !Ref 'AWS::Region'
+
+  TrainingDataBucket:
+    Description: S3 Bucket for the Configuration and Model Training Data.
+    Value: !Sub s3://${Bucket}

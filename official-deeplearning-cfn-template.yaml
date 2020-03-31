@@ -1,0 +1,1090 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Launches a Deep Learning Cluster with one Master and variable number of
+  Workers.
+Parameters:
+  KeyName:
+    Description: >-
+      Name of an existing Amazon EC2 KeyPair to enable SSH access to the
+      instances
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  WorkerCount:
+    Description: The number of worker instances (launches +1 instance for the Master).
+    Type: Number
+    MinValue: '1'
+    Default: '1'
+  InstanceType:
+    Description: 'The EC2 instance type for workers.For GPUs choose g3.xx, p2.xx or p3.xx.'
+    Type: String
+    Default: p3.2xlarge
+    AllowedValues:
+      - p2.16xlarge
+      - p2.8xlarge
+      - p2.xlarge
+      - p3.2xlarge
+      - p3.8xlarge
+      - p3.16xlarge
+      - g3.16xlarge
+      - g3.8xlarge
+      - g3.4xlarge
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - m4.10xlarge
+      - m4.16xlarge
+      - m3.medium
+      - m3.large
+      - m3.xlarge
+      - m3.2xlarge
+      - c4.large
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+      - c4.8xlarge
+      - c3.large
+      - c3.xlarge
+      - c3.2xlarge
+      - c3.4xlarge
+      - c3.8xlarge
+      - x1.16large
+      - x1.32xlarge
+      - r4.large
+      - r4.xlarge
+      - r4.2xlarge
+      - r4.4xlarge
+      - r4.8xlarge
+      - r4.16xlarge
+      - r3.large
+      - r3.xlarge
+      - r3.2xlarge
+      - r3.4xlarge
+      - r3.8xlarge
+      - i2.xlarge
+      - i2.2xlarge
+      - i2.4xlarge
+      - i2.8xlarge
+      - d2.xlarge
+      - d2.2xlarge
+      - d2.4xlarge
+      - d2.8xlarge
+      - f1.2xlarge
+      - f1.16xlarge
+    ConstraintDescription: Must be a valid CPU optimized or GPU EC2 instance type.
+  ImageType:
+    Description: Linux Flavor(Amazon Linux or Ubuntu)
+    Type: String
+    Default: Ubuntu
+    AllowedValues:
+      - AmazonLinux
+      - Ubuntu
+    ConstraintDescription: Amazon Supported Image Type
+  SSHLocation:
+    Description: >-
+      Restrict SSH access to a valid CIDR range, this should be a valid CIDR IP
+      address range that you want to allow access to your Master and Stack.
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: Must be a valid CIDR range of the form x.x.x.x/x
+  EFSFileSystemId:
+    Description: >-
+      Existing Amazon EFS File System Id or leave it blank to create a new EFS
+      File System.
+    Type: String
+    AllowedPattern: '(^fs-[0-9a-f]{8,8})$|()$'
+    Default: ''
+    ConstraintDescription: Should be a Valid EFS File System Id
+  EFSMountPoint:
+    Description: The Linux mount point for the EFS volume
+    Type: String
+    MinLength: '1'
+    Default: myEFSvolume
+Conditions:
+  CreateNewFileSystem: !Equals 
+    - !Ref EFSFileSystemId
+    - ''
+Mappings:
+  AmazonLinux:
+    us-east-1:
+      AMI: ami-087379093eeda94ae
+    us-west-2:
+      AMI: ami-060f1e7b74b27ee67
+    eu-west-1:
+      AMI: ami-00822a35afa569253
+    us-east-2:
+      AMI: ami-0a06156dfe1431263
+    ap-southeast-2:
+      AMI: ami-0515ea78aad8ea686
+    ap-northeast-1:
+      AMI: ami-005014c3a04c47806
+    ap-northeast-2:
+      AMI: ami-0fe3eaf8794eb0d3b
+    ap-south-1:
+      AMI: ami-0d7c4d21157d329b2
+    eu-central-1:
+      AMI: ami-06ae1bbcb7042c6c6
+    ap-southeast-1:
+      AMI: ami-00df391eb41e2afbd
+    us-west-1:
+      AMI: ami-0ab9d3de3c0467d0c
+  Ubuntu:
+    us-east-1:
+      AMI: ami-0d96d570269578cd7
+    us-west-2:
+      AMI: ami-0027dfad6168539c7
+    eu-west-1:
+      AMI: ami-0e9085a8d461c2d01
+    us-east-2:
+      AMI: ami-0a47106e391391252
+    ap-southeast-2:
+      AMI: ami-048c002ab05a657b9
+    ap-northeast-1:
+      AMI: ami-0812aef741b2ca3c2
+    ap-northeast-2:
+      AMI: ami-0cc8a10d4b729c065
+    ap-south-1:
+      AMI: ami-0556cfc195004ba96
+    eu-central-1:
+      AMI: ami-002b6c63ff04afa5f
+    ap-southeast-1:
+      AMI: ami-01c5a0f3151202f36
+    us-west-1:
+      AMI: ami-0f627d6558d18ecfa
+  SubnetConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    Public:
+      CIDR: 10.0.0.0/24
+    Private:
+      CIDR: 10.0.1.0/24
+  S3:
+    us-east-1:
+      URL: 'https://s3.amazonaws.com/'
+    us-west-2:
+      URL: 'https://s3-us-west-2.amazonaws.com/'
+    eu-west-1:
+      URL: 'https://s3-eu-west-1.amazonaws.com/'
+    us-east-2:
+      URL: 'https://s3-us-east-2.amazonaws.com/'
+    ap-southeast-2:
+      URL: 'https://s3-ap-southeast-2.amazonaws.com/'
+    ap-northeast-1:
+      URL: 'https://s3-ap-northeast-1.amazonaws.com/'
+    ap-northeast-2:
+      URL: 'https://s3-ap-northeast-2.amazonaws.com/'
+    ap-south-1:
+      URL: 'https://s3-ap-south-1.amazonaws.com/'
+    eu-central-1:
+      URL: 'https://s3-eu-central-1.amazonaws.com/'
+    ap-southeast-1:
+      URL: 'https://s3-ap-southeast-1.amazonaws.com/'
+    us-west-1:
+      URL: 'https://s3-us-west-1.amazonaws.com/'
+  Other:
+    S3SourceBucket:
+      BucketNameSuffix: '-aws-dl-cfn'
+    Setup:
+      Filename: dl_cfn_setup_v2.py
+    LambdaFunction:
+      FileName: dl_cfn_setup_lambda.zip
+    TimeoutValues:
+      WaitConditionTimeout: '3300'
+      MasterLaunchTimeout: '600'
+    DefaultUser:
+      AmazonLinux: ec2-user
+      Ubuntu: ubuntu
+    CfnPath:
+      AmazonLinux: /opt/aws/bin
+      Ubuntu: /usr/local/bin
+Resources:
+  ResourceMetadataLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    DependsOn:
+      - MasterQueue
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt 
+        - LambdaExecutionRole
+        - Arn
+      Code:
+        S3Bucket: !Join 
+          - ''
+          - - !Ref 'AWS::Region'
+            - !FindInMap 
+              - Other
+              - S3SourceBucket
+              - BucketNameSuffix
+        S3Key: !FindInMap 
+          - Other
+          - LambdaFunction
+          - FileName
+      MemorySize: '256'
+      Timeout: '60'
+      Runtime: python2.7
+      Environment:
+        Variables:
+          AWS_DL_STACK_ID: !Ref 'AWS::StackName'
+          AWS_DL_MASTER_SQS_URL: !Ref MasterQueue
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn:
+      - MasterQueue
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: AWSDeepLearningLambdaExecutionRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'autoscaling:DescribeAutoScalingGroups'
+                  - 'autoscaling:SetDesiredCapacity'
+                  - 'autoscaling:SuspendProcesses'
+                  - 'cloudformation:DescribeStackResource'
+                  - 'cloudformation:SignalResource'
+                Resource: '*'
+        - PolicyName: AllowLambdaSQSSend
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:sendmessage'
+                Resource: !GetAtt 
+                  - MasterQueue
+                  - Arn
+  PermissionForSNSToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - ResourceMetadataLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref ResourceMetadataSNSTopic
+  InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-InstanceRole'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: instance
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'autoscaling:DescribeAutoScalingGroups'
+                  - 'autoscaling:DescribeAutoScalingInstances'
+                  - 'ec2:DescribeInstances'
+                  - 'cloudformation:DescribeStackResource'
+                Resource: '*'
+        - PolicyName: allow-sqs-receive-send-delete-master
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:ReceiveMessage'
+                  - 'sqs:SendMessage'
+                  - 'sqs:GetQueueUrl'
+                Resource: !GetAtt 
+                  - MasterQueue
+                  - Arn
+        - PolicyName: allow-sqs-receive-send-delete-worker
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:ReceiveMessage'
+                  - 'sqs:SendMessage'
+                  - 'sqs:GetQueueUrl'
+                Resource: !GetAtt 
+                  - WorkerQueue
+                  - Arn
+        - PolicyName: allow-to-send-signal-to-WaitConditionHandle
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource: !Join 
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - cloudformation-waitcondition-
+                    - !Ref 'AWS::Region'
+                    - /*
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    DependsOn: InstanceRole
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+  AdminSSHSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group that controls SSH access to the Master instance.
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - _SSH
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref SSHLocation
+      SecurityGroupEgress: []
+  MasterSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable Port access to and from the Master on the Private Interface.
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - _Master
+      SecurityGroupIngress: []
+      SecurityGroupEgress: []
+  MasterSecurityIngress1:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - MasterSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+  MasterSecurityIngress2:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - MasterSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+      IpProtocol: icmp
+      FromPort: '-1'
+      ToPort: '-1'
+      SourceSecurityGroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+  MasterSecurityIngress3:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - MasterSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+  MasterSecurityIngress4:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - MasterSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - MasterSecurityGroup
+        - GroupId
+      IpProtocol: icmp
+      FromPort: '-1'
+      ToPort: '-1'
+      SourceSecurityGroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+  WorkerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn:
+      - MasterSecurityGroup
+    Properties:
+      GroupDescription: Enable Port access to and from the Worker on the Private Interface
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - _Worker
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '0'
+          ToPort: '65535'
+          SourceSecurityGroupId: !Ref MasterSecurityGroup
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          SourceSecurityGroupId: !Ref MasterSecurityGroup
+      SecurityGroupEgress: []
+  WorkerSecurityIngress3:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - WorkerSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+      IpProtocol: tcp
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+  WorkerSecurityIngress4:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    DependsOn:
+      - WorkerSecurityGroup
+    Properties:
+      GroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+      IpProtocol: icmp
+      FromPort: '-1'
+      ToPort: '-1'
+      SourceSecurityGroupId: !GetAtt 
+        - WorkerSecurityGroup
+        - GroupId
+  MountTargetSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn:
+      - MasterSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      GroupDescription: Security group for mount target
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - _Master
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          SourceSecurityGroupId: !Ref MasterSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          SourceSecurityGroupId: !Ref WorkerSecurityGroup
+      SecurityGroupEgress: []
+  FileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Condition: CreateNewFileSystem
+    DeletionPolicy: Retain
+    Properties:
+      PerformanceMode: generalPurpose
+      FileSystemTags:
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  MountTarget:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !If 
+        - CreateNewFileSystem
+        - !Ref FileSystem
+        - !Ref EFSFileSystemId
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroups:
+        - !Ref MountTargetSecurityGroup
+  WorkerLaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !FindInMap 
+        - !Ref ImageType
+        - !Ref 'AWS::Region'
+        - AMI
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroups:
+        - !Ref WorkerSecurityGroup
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - '#!/bin/bash -xe'
+            - |+
+
+            - '# setup ssh-forwarding. '
+            - >-
+              sed -i "s/^#\(\s\+\)ForwardAgent\(\s\+\)no/\
+              \1ForwardAgent\2yes/g" /etc/ssh/ssh_config
+            - |+
+
+            - mkdir -p /opt/deeplearning
+            - |+
+
+            - |
+              # run cfn-init. 
+            - !FindInMap 
+              - Other
+              - CfnPath
+              - !Ref ImageType
+            - '\/cfn-init -v --region '
+            - !Ref 'AWS::Region'
+            - ' --configsets Setup '
+            - ' -s '
+            - !Ref 'AWS::StackId'
+            - ' -r WorkerLaunchConfig '
+            - |+
+
+            - ''
+      KeyName: !Ref KeyName
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          Setup:
+            - efs-config
+            - download-setup
+            - deeplearning-config
+        efs-config:
+          commands:
+            00_install_nfs:
+              command: !Join 
+                - ''
+                - - 'if [ "AmazonLinux" = "'
+                  - !Ref ImageType
+                  - '" ];'
+                  - >-
+                    then yum -y -q install nfs-utils; else apt-get -qq -y
+                    install nfs-common ; fi
+            01_createdir:
+              command: !Join 
+                - ''
+                - - mkdir -p /
+                  - !Ref EFSMountPoint
+            02_mount:
+              command: !Join 
+                - ''
+                - - >-
+                    sudo mount -t nfs4 -o
+                    nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 
+                  - !If 
+                    - CreateNewFileSystem
+                    - !Ref FileSystem
+                    - !Ref EFSFileSystemId
+                  - .efs.
+                  - !Ref 'AWS::Region'
+                  - '.amazonaws.com:/ /'
+                  - !Ref EFSMountPoint
+            03_permissions:
+              command: !Join 
+                - ''
+                - - 'chown '
+                  - !FindInMap 
+                    - Other
+                    - DefaultUser
+                    - !Ref ImageType
+                  - ':'
+                  - !FindInMap 
+                    - Other
+                    - DefaultUser
+                    - !Ref ImageType
+                  - ' /'
+                  - !Ref EFSMountPoint
+        download-setup:
+          files:
+            /opt/deeplearning/dl_cfn_setup_v2.py:
+              source: !Join 
+                - ''
+                - - !FindInMap 
+                    - S3
+                    - !Ref 'AWS::Region'
+                    - URL
+                  - !Join 
+                    - ''
+                    - - !Ref 'AWS::Region'
+                      - !FindInMap 
+                        - Other
+                        - S3SourceBucket
+                        - BucketNameSuffix
+                  - /
+                  - !FindInMap 
+                    - Other
+                    - Setup
+                    - Filename
+        deeplearning-config:
+          commands:
+            01_setup:
+              command: >-
+                python /opt/deeplearning/dl_cfn_setup_v2.py | tee -a
+                /var/log/cloud-init-output.log
+              cwd: /opt/deeplearning
+              env:
+                AWS_DL_NODE_TYPE: Worker
+                AWS_DL_MASTER_QUEUE: !GetAtt 
+                  - MasterQueue
+                  - QueueName
+                AWS_DL_WORKER_QUEUE: !GetAtt 
+                  - WorkerQueue
+                  - QueueName
+                AWS_DL_WAITCONDITION_TIMEOUT: !FindInMap 
+                  - Other
+                  - TimeoutValues
+                  - WaitConditionTimeout
+                AWS_DL_MASTERLAUNCH_TIMEOUT: !FindInMap 
+                  - Other
+                  - TimeoutValues
+                  - MasterLaunchTimeout
+                AWS_DL_STACK_ID: !Ref 'AWS::StackId'
+                AWS_DL_WAIT_HANDLE: !Ref myWaitHandle
+                AWS_DL_ROLE_NAME: !Join 
+                  - ''
+                  - - !Ref 'AWS::StackName'
+                    - '-InstanceRole'
+                AWS_DL_DEFAULT_USER: !FindInMap 
+                  - Other
+                  - DefaultUser
+                  - !Ref ImageType
+                AWS_REGION: !Ref 'AWS::Region'
+                EFS_MOUNT: !Join 
+                  - ''
+                  - - /
+                    - !Ref EFSMountPoint
+                CFN_PATH: !FindInMap 
+                  - Other
+                  - CfnPath
+                  - !Ref ImageType
+  MasterLaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      AssociatePublicIpAddress: 'true'
+      ImageId: !FindInMap 
+        - !Ref ImageType
+        - !Ref 'AWS::Region'
+        - AMI
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroups:
+        - !Ref MasterSecurityGroup
+        - !Ref AdminSSHSecurityGroup
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - '#!/bin/bash -xe'
+            - |+
+
+            - |
+              # setup ssh-forwarding. 
+            - >-
+              sed -i "s/^#\(\s\+\)ForwardAgent\(\s\+\)no/\
+              \1ForwardAgent\2yes/g" /etc/ssh/ssh_config
+            - |+
+
+            - mkdir -p /opt/deeplearning
+            - |+
+
+            - |
+              # run cfn-init. 
+            - !FindInMap 
+              - Other
+              - CfnPath
+              - !Ref ImageType
+            - '\/cfn-init -v --region '
+            - !Ref 'AWS::Region'
+            - ' --configsets Setup '
+            - ' -s '
+            - !Ref 'AWS::StackId'
+            - ' -r MasterLaunchConfig '
+            - |+
+
+            - ''
+      KeyName: !Ref KeyName
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          Setup:
+            - efs-config
+            - download-setup
+            - deeplearning-config
+        efs-config:
+          commands:
+            00_install_nfs:
+              command: !Join 
+                - ''
+                - - 'if [ "AmazonLinux" = "'
+                  - !Ref ImageType
+                  - '" ];'
+                  - >-
+                    then yum -y -q install nfs-utils; else apt-get -qq -y
+                    install nfs-common ; fi
+            01_createdir:
+              command: !Join 
+                - ''
+                - - mkdir -p /
+                  - !Ref EFSMountPoint
+            02_mount:
+              command: !Join 
+                - ''
+                - - >-
+                    sudo mount -t nfs4 -o
+                    nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 
+                  - !If 
+                    - CreateNewFileSystem
+                    - !Ref FileSystem
+                    - !Ref EFSFileSystemId
+                  - .efs.
+                  - !Ref 'AWS::Region'
+                  - '.amazonaws.com:/ /'
+                  - !Ref EFSMountPoint
+            03_permissions:
+              command: !Join 
+                - ''
+                - - 'chown '
+                  - !FindInMap 
+                    - Other
+                    - DefaultUser
+                    - !Ref ImageType
+                  - ':'
+                  - !FindInMap 
+                    - Other
+                    - DefaultUser
+                    - !Ref ImageType
+                  - ' /'
+                  - !Ref EFSMountPoint
+        download-setup:
+          files:
+            /opt/deeplearning/dl_cfn_setup_v2.py:
+              source: !Join 
+                - ''
+                - - !FindInMap 
+                    - S3
+                    - !Ref 'AWS::Region'
+                    - URL
+                  - !Join 
+                    - ''
+                    - - !Ref 'AWS::Region'
+                      - !FindInMap 
+                        - Other
+                        - S3SourceBucket
+                        - BucketNameSuffix
+                  - /
+                  - !FindInMap 
+                    - Other
+                    - Setup
+                    - Filename
+        deeplearning-config:
+          commands:
+            01_setup:
+              command: >-
+                python /opt/deeplearning/dl_cfn_setup_v2.py | tee -a
+                /var/log/cloud-init-output.log
+              cwd: /opt/deeplearning
+              env:
+                AWS_DL_NODE_TYPE: Master
+                AWS_DL_MASTER_QUEUE: !GetAtt 
+                  - MasterQueue
+                  - QueueName
+                AWS_DL_WORKER_QUEUE: !GetAtt 
+                  - WorkerQueue
+                  - QueueName
+                AWS_DL_WAITCONDITION_TIMEOUT: !FindInMap 
+                  - Other
+                  - TimeoutValues
+                  - WaitConditionTimeout
+                AWS_DL_MASTERLAUNCH_TIMEOUT: !FindInMap 
+                  - Other
+                  - TimeoutValues
+                  - MasterLaunchTimeout
+                AWS_DL_STACK_ID: !Ref 'AWS::StackId'
+                AWS_DL_WAIT_HANDLE: !Ref myWaitHandle
+                AWS_DL_ROLE_NAME: !Join 
+                  - ''
+                  - - !Ref 'AWS::StackName'
+                    - '-InstanceRole'
+                AWS_DL_DEFAULT_USER: !FindInMap 
+                  - Other
+                  - DefaultUser
+                  - !Ref ImageType
+                AWS_REGION: !Ref 'AWS::Region'
+                EFS_MOUNT: !Join 
+                  - ''
+                  - - /
+                    - !Ref EFSMountPoint
+                CFN_PATH: !FindInMap 
+                  - Other
+                  - CfnPath
+                  - !Ref ImageType
+  MasterAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+      - MasterLaunchConfig
+      - MountTarget
+      - MasterQueue
+      - WorkerQueue
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: !Join 
+          - ''
+          - - PT
+            - !FindInMap 
+              - Other
+              - TimeoutValues
+              - MasterLaunchTimeout
+            - S
+        Count: '1'
+    Properties:
+      DesiredCapacity: '1'
+      MinSize: '1'
+      MaxSize: '1'
+      LaunchConfigurationName: !Ref MasterLaunchConfig
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      NotificationConfiguration:
+        TopicARN: !Ref ResourceMetadataSNSTopic
+        NotificationTypes:
+          - 'autoscaling:EC2_INSTANCE_LAUNCH'
+          - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-Master'
+          PropagateAtLaunch: true
+        - Key: NodeType
+          Value: Master
+          PropagateAtLaunch: true
+  WorkerAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+      - WorkerLaunchConfig
+      - MountTarget
+      - MasterQueue
+      - WorkerQueue
+      - MasterAutoScalingGroup
+    Properties:
+      MinSize: '0'
+      MaxSize: !Ref WorkerCount
+      DesiredCapacity: !Ref WorkerCount
+      LaunchConfigurationName: !Ref WorkerLaunchConfig
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet
+      NotificationConfiguration:
+        TopicARN: !Ref ResourceMetadataSNSTopic
+        NotificationTypes:
+          - 'autoscaling:EC2_INSTANCE_LAUNCH'
+          - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ''
+            - - !Ref 'AWS::StackName'
+              - '-Worker'
+          PropagateAtLaunch: true
+        - Key: NodeType
+          Value: Worker
+          PropagateAtLaunch: true
+  MasterQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-aws-dl-cfn-master'
+  WorkerQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-aws-dl-cfn-worker'
+  ResourceMetadataSNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-aws-dl-cfn'
+      Subscription:
+        - Endpoint: !GetAtt 
+            - ResourceMetadataLambdaFunction
+            - Arn
+          Protocol: lambda
+      TopicName: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-aws-dl-cfn'
+  myWaitHandle:
+    Type: 'AWS::CloudFormation::WaitConditionHandle'
+    Properties: {}
+  myWaitCondition:
+    Type: 'AWS::CloudFormation::WaitCondition'
+    Properties:
+      Handle: !Ref myWaitHandle
+      Timeout: !FindInMap 
+        - Other
+        - TimeoutValues
+        - WaitConditionTimeout
+  NATGatewayEIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
+  Vpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - VPC
+        - CIDR
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Network
+          Value: Public
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  GatewayToInternet:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicSubnet:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn:
+      - PrivateSubnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !GetAtt 
+        - PrivateSubnet
+        - AvailabilityZone
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - Public
+        - CIDR
+      Tags:
+        - Key: Network
+          Value: Public
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  PrivateSubnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - Private
+        - CIDR
+      Tags:
+        - Key: Network
+          Value: Private
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  NATGateway:
+    Type: 'AWS::EC2::NatGateway'
+    DependsOn: GatewayToInternet
+    Properties:
+      AllocationId: !GetAtt 
+        - NATGatewayEIP
+        - AllocationId
+      SubnetId: !Ref PublicSubnet
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn: GatewayToInternet
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Network
+          Value: Public
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRouteAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  PrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Network
+          Value: Private
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+  PrivateRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+  PrivateSubnetRouteAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+Outputs:
+  AdminSSHSecurityGroup:
+    Description: Security Group that restricts Inbound IPs to SSH into the Master
+    Value: !Ref AdminSSHSecurityGroup
+  MasterAutoScalingGroup:
+    Description: Autoscaling Group that contains the Master Instance
+    Value: !Ref MasterAutoScalingGroup
+  WorkerAutoScalingGroup:
+    Description: Autoscaling Group that contains the Workers
+    Value: !Ref WorkerAutoScalingGroup
+  MountTargetID:
+    Description: EFS Mount target ID
+    Value: !Ref MountTarget

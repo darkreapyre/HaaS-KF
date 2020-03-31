@@ -1,0 +1,39 @@
+#!/bin/bash
+
+echo -n "Enter the AWS Region to use > "
+read region
+#echo -n "Enter S3 Bucket name to host the templates and scripts > "
+#read bucket
+echo -n "Enter CloudFormation stackname to create (lower-case) > "
+read stackname
+echo -n "Enter the number of epochs to train the model > "
+read epochs
+echo -n "Enter the number of training batches > "
+read batches
+echo -n "Enter the Optimizer learning rate > "
+read learningrate
+echo -n "Enter the e-mail address for Pipeline Approval > "
+read email
+
+echo ""
+echo -n "Packaging Source Code ..."
+echo ""
+zip -r staging/src.zip Dockerfile* keras.json src/model/* functions/preprocess.py
+
+echo ""
+echo -n "Configuring S3 Bootstratp Environmentt ..."
+echo ""
+aws s3 mb "s3://${stackname}-bootstrap-${region}" --region $region
+aws s3 cp staging/src.zip "s3://${stackname}-bootstrap-${region}/artifacts/" --acl public-read --region $region
+aws s3 cp ../../Assets/data.zip "s3://${stackname}-bootstrap-${region}/assets/" --acl public-read --region $region
+aws s3api put-bucket-versioning --bucket "${stackname}-bootstrap-${region}" --versioning-configuration Status=Enabled --region $region
+
+echo ""
+echo -n "Building CloudFormation Package ..."
+echo ""
+aws cloudformation package --region us-east-1 --s3-bucket "${stackname}-bootstrap-${region}" --template ./templates/Workflow.yaml --output-template-file staging/output.yaml
+
+echo ""
+echo -n "Launching CloudFormation Stack ..."
+echo ""
+aws cloudformation deploy --stack-name $stackname --template-file staging/output.yaml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides ModelPrefix=$stackname EmailAddress=$email S3BootstrapBucket=${stackname}-bootstrap-${region} Epochs=${epochs} BatchSize=${batches} LearningRate=${learningrate} --region $region
